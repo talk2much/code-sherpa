@@ -1,0 +1,46 @@
+# LPGJ - 旅拍管家 目标代码库配置
+# code-sherpa 对此代码库严格只读
+
+name: lpgj
+description: 旅拍管家 - 影像经营 SaaS
+
+# 绝对路径挂载
+root: /Users/zhumingyang/Desktop/project/LPGJ
+
+# 访问控制（硬性约束，不可修改）
+read_only: true
+
+# 关键目录映射（帮助 Agent 快速定位，减少 Token 消耗）
+paths:
+  contracts: packages/contracts/src
+  database: packages/database/prisma
+  server: apps/server/src
+  admin_web: apps/admin-web/src
+  merchant_desktop: apps/merchant-desktop/src
+  user_miniapp: apps/user-miniapp/src
+  mobile_demo: apps/mobile-demo/src
+  product_demo: apps/product-demo/src
+  docs: docs
+
+# 领域知识文件（Agent 启动时预加载）
+context:
+  product: docs/0-product-design/product-overview.md
+  architecture: docs/3-technical-architecture/architecture-overview.md
+  ubiquitous_language: docs/2-domain-model/ubiquitous-language.md
+  tech_stack: docs/3-technical-architecture/technology-stack.md
+
+# 索引配置
+index:
+  include:
+    - "apps/**/*.ts"
+    - "apps/**/*.tsx"
+    - "packages/**/*.ts"
+    - "packages/**/*.tsx"
+  exclude:
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/.claude/**"
+    - "**/*.d.ts"
+    - "**/e2e/**"
+    - "**/playwright/**"
+  max_file_lines: 5000

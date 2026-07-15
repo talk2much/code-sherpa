@@ -16,3 +16,15 @@ venv/
 
 # Claude
 .claude/settings.local.json
+
+# Build
+dist/
+
+# Index (pre-built, gitignored per spec 02)
+index/
+
+# Env
+.env
+
+# Logs
+*.log
