@@ -103,7 +103,7 @@ async function agentLoop(
 interface Skill {
   name: string;
   description: string;
-  systemPromptSections: string[];  // 注入 System Prompt 的段落
+  systemPromptTemplate: string;    // Markdown 文件 body，含 {{占位符}}
   availableTools: string[];        // 该 Skill 可使用的 Tool 白名单
   planningStrategy: PlanningStrategy;
 }
@@ -114,75 +114,96 @@ type PlanningStrategy =
   | 'map_reduce';      // 分片处理再聚合
 ```
 
+### Skill 源文件格式
+
+Skill 以 `.skill.md` 文件维护——**Markdown 是源，人是作者，LLM 是读者**。Frontmatter 定义元数据，body 直接就是 System Prompt 模板：
+
+```markdown
+---
+name: impact-analysis
+description: 分析修改某个符号会影响的代码范围
+tools:
+  - file_read
+  - grep_search
+  - ast_query
+  - db_schema_read
+  - contract_trace
+planning: sequential
+---
+
+# 角色
+你是代码影响面分析专家。你的任务是追踪符号在代码库中的所有引用。
+
+# 分析步骤
+1. 找到直接引用
+2. 找到间接引用
+3. 检查数据库模型
+4. 检查前端页面
+5. 生成报告
+
+# 输出要求
+- 必须提供准确的文件路径和行号
+- 不确定时要明确标注"推测"
+
+{{domain_knowledge}}
+{{project_structure}}
+```
+
+运行时由 loader 解析 frontmatter 拿到结构化字段，body 作为 `systemPromptTemplate`，替换 `{{占位符}}` 后注入最终 System Prompt。
+
+> **为什么选 Markdown？** Skill 的核心资产是 prompt 文本，不是数据结构。Markdown 让人能以自然段落、标题层级、列表来组织 prompt——这些在 TS 字符串数组里全部丢失。Frontmatter 解决结构化元数据（name、tools、planning），body 解决 prompt 文本，各司其职。Claude Code（`.claude/agents/*.md`）、Cursor（`.cursorrules`）都选了这条路，这是行业共识。MVP 期只有 2 个 skill 时 TS 对象也能用，但 `.skill.md` 格式从一开始就为扩展留好了空间——新增 skill 就是新增一个文件，零代码改动。
+
 ### MVP 期两个 Skill
 
 #### 1. impact-analysis（影响面分析）
 
-```typescript
-const impactAnalysisSkill: Skill = {
-  name: 'impact-analysis',
-  description: '分析修改某个符号会影响的代码范围',
-  systemPromptSections: [
-    '你是代码影响面分析专家。你的任务是追踪符号在代码库中的所有引用。',
-    '分析步骤：1. 找到直接引用 2. 找到间接引用 3. 检查数据库模型 4. 检查前端页面 5. 生成报告',
-    '你必须提供准确的文件路径和行号。不确定时要明确标注"推测"。',
-    domainKnowledgeSection,  // 注入 LPGJ 领域知识
-  ],
-  availableTools: [
-    'file_read',
-    'grep_search',
-    'ast_query',
-    'db_schema_read',
-    'contract_trace',
-  ],
-  planningStrategy: 'sequential',
-};
-```
+文件：`skills/impact-analysis.skill.md`（内容如上）
 
 #### 2. code-archaeology（代码考古）
 
-```typescript
-const codeArchaeologySkill: Skill = {
-  name: 'code-archaeology',
-  description: '追溯代码历史、设计决策和演变原因',
-  systemPromptSections: [
-    '你是代码考古专家。你的任务是回答"为什么代码是这样的"。',
-    '调查路径：1. Git 历史 2. 相关 PR/Issue 3. 架构文档 4. 代码注释 5. 提交信息',
-    '区分"事实"（代码实际行为）和"推测"（可能的设计意图）。',
-  ],
-  availableTools: [
-    'file_read',
-    'git_log',
-    'grep_search',
-    'ast_query',
-  ],
-  planningStrategy: 'sequential',
-};
-```
+文件：`skills/code-archaeology.skill.md`
 
 ### Skill 加载机制
 
 ```typescript
 // src/core/skill-loader.ts
 
+import { parse as parseFrontmatter } from 'yaml';
+
 function loadSkill(name: string, target: TargetConfig): Skill {
-  const skill = skillRegistry[name];
-  
-  // 注入领域知识
-  const domainKnowledge = loadDomainKnowledge(target);
-  skill.systemPromptSections.push(domainKnowledge);
-  
-  // 注入项目结构知识
-  const projectStructure = loadProjectStructure(target);
-  skill.systemPromptSections.push(projectStructure);
-  
-  return skill;
+  // 1. 读取 .skill.md 文件
+  const raw = readFile(`skills/${name}.skill.md`);
+
+  // 2. 解析 frontmatter → { name, description, tools, planning }
+  const { frontmatter, body } = parseFrontmatter(raw);
+
+  // 3. 构建 Skill 对象：body 作为模板，运行时注入上下文
+  return {
+    name: frontmatter.name,
+    description: frontmatter.description,
+    systemPromptTemplate: body,      // MD body 原样保留，含 {{占位符}}
+    availableTools: frontmatter.tools,
+    planningStrategy: frontmatter.planning,
+  };
 }
 
 function buildSystemPrompt(config: AgentLoopConfig): string {
+  // 运行时上下文
+  const runtimeSections = {
+    domain_knowledge: loadDomainKnowledge(config.target),
+    project_structure: loadProjectStructure(config.target),
+  };
+
+  // 替换模板中的 {{占位符}}
+  let prompt = config.skill.systemPromptTemplate;
+  for (const [key, value] of Object.entries(runtimeSections)) {
+    prompt = prompt.replaceAll(`{{${key}}}`, value);
+  }
+
+  // 外围框架
   const sections = [
     baseSystemPrompt,           // Agent 基础行为约束
-    ...config.skill.systemPromptSections,
+    prompt,                     // Skill 模板（已注入运行时上下文）
     toolUsageGuidelines,        // Tool 使用规范
     outputFormatRequirements,   // 输出格式要求
   ];
@@ -200,27 +221,22 @@ function buildSystemPrompt(config: AgentLoopConfig): string {
 [Base Agent Identity]
   └─ 你是 code-sherpa，代码治理 Agent。你严格只读，不修改代码。
 
-[Skill-Specific Identity]
-  └─ 当前模式：影响面分析专家 / 代码考古专家
+[Skill Template（来自 .skill.md body）]  ← 已替换 {{占位符}}
+  ├─ Skill 角色定义
+  ├─ 分析步骤
+  ├─ {{domain_knowledge}}    → 替换为 LPGJ 领域知识摘要
+  └─ {{project_structure}}   → 替换为项目结构地图
 
-[Domain Knowledge]
-  └─ LPGJ 产品概述（摘要）
-  └─ 统一语言术语表
-  └─ 架构概览
-
-[Project Structure Map]
-  └─ apps/server/src: 后端 API
-  └─ packages/contracts/src: 共享契约
-  └─ ...
-
-[Tool Definitions]
+[Tool Usage Guidelines]
   └─ 当前 Skill 可用的 Tools
 
-[Output Format]
+[Output Format Requirements]
   └─ 必须包含文件路径和行号
   └─ 不确定时标注置信度
   └─ 引用必须经过验证
 ```
+
+> **设计决策**：Domain Knowledge 和 Project Structure 不作为独立段落注入，而是通过 `{{占位符}}` 替换到 Skill 模板中。这样 Skill 作者可以自由决定这些信息出现在 prompt 中的位置——放在角色定义之后、放在步骤说明之中、还是放在末尾作为附录。
 
 ### 领域知识压缩
 

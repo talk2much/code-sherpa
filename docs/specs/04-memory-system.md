@@ -11,6 +11,8 @@
 ## 三级记忆架构
 
 ```
+（MVP 期使用 L1 + L2，L3 为 Phase 2 预留）
+
 ┌─────────────────────────────────────────────┐
 │              用户查询（Query）                │
 └─────────────────┬───────────────────────────┘
@@ -21,6 +23,7 @@
 │ Session│  │ 工作区   │  │  长期    │
 │  Memory│  │ Memory   │  │ Memory   │
 │(当前会话)│  │(当前项目) │  │(跨项目)  │
+│  ✅ MVP│  │  ✅ MVP  │  │ 🔮 Ph.2 │
 └────┬───┘  └────┬─────┘  └────┬─────┘
      │           │             │
      ▼           ▼             ▼
@@ -137,6 +140,58 @@ interface WorkspaceMemory {
 
 ### 写入时机
 
+Workspace Memory 的 5 个字段分两批写入——结构性的在构建索引时一次写入，累积性的在每次查询后增量追加。
+
+#### 初始构建（index:build / index:update）
+
+`projectMap` 和 `domainKnowledge` 是项目结构信息，随索引构建一起生成：
+
+```typescript
+// src/memory/workspace-builder.ts
+
+async function buildWorkspaceMemory(target: TargetConfig): Promise<void> {
+  // 1. projectMap ← 从索引扫描结果聚合
+  const modules = loadModules('index/lpgj/modules.jsonl');
+  const projectMap = {
+    packages: [...new Set(modules.map(m => m.packageName))],
+    apps: deriveApps(modules, target.paths),
+    keyFiles: buildKeyFileMap(modules, target.paths),
+  };
+
+  // 2. domainKnowledge ← 从 TargetConfig.context 文档摘要
+  const domainKnowledge = {
+    ubiquitousLanguage: parseUbiquitousLanguage(
+      readFile(target.context.ubiquitous_language)      // docs/2-domain-model/ubiquitous-language.md
+    ),
+    keyConcepts: extractKeyConcepts(
+      readFile(target.context.product)                   // docs/0-product-design/product-overview.md
+    ),
+    architectureSummary: summarizeArchitecture(
+      readFile(target.context.architecture)              // docs/3-technical-architecture/architecture-overview.md
+    ),
+  };
+
+  await saveWorkspaceMemory({
+    target: target.name,
+    lastUpdated: Date.now(),
+    projectMap,
+    domainKnowledge,
+    accessPatterns: [],
+    queryHistory: [],
+    corrections: [],
+  });
+}
+```
+
+触发时机：
+- `index:build` 首次构建 → 全量写入
+- `index:update` 检测到模块增删 → 重新聚合 `projectMap`，`domainKnowledge` 不变
+- `config:init` 更新了 context 文档路径 → 重新生成 `domainKnowledge`
+
+#### 增量更新（每次查询后）
+
+`accessPatterns`、`queryHistory`、`corrections` 随查询累积，每次 Agent 查询结束后追加：
+
 ```typescript
 // 查询结束后，如果用户明确给出反馈（👍 / 👎 / 修正）
 // 或者查询涉及新的高频文件，自动更新 accessPatterns
@@ -147,12 +202,12 @@ async function updateWorkspaceMemory(
 ): Promise<void> {
   const memory = loadWorkspaceMemory(target);
 
-  // 更新访问模式
+  // ① accessPatterns ← 从 session.fileCache 统计
   for (const [path, entry] of session.fileCache) {
     updateAccessPattern(memory, path, entry.accessCount);
   }
 
-  // 记录查询
+  // ② queryHistory ← 从 session.messages 提取
   memory.queryHistory.push({
     query: session.messages[0].content,
     timestamp: Date.now(),
@@ -160,7 +215,7 @@ async function updateWorkspaceMemory(
     relevantFiles: [...session.fileCache.keys()],
   });
 
-  // 记录修正
+  // ③ corrections ← 用户纠正时
   if (userFeedback?.type === 'correction') {
     memory.corrections.push({
       originalAnswer: userFeedback.original,
@@ -176,7 +231,9 @@ async function updateWorkspaceMemory(
 
 ---
 
-## Level 3: Long-term Memory（长期记忆）
+## Level 3: Long-term Memory（长期记忆）[Phase 2]
+
+> **MVP 期不实现。** Level 3 需要跨项目数据才能发挥作用，MVP 期只有一个目标项目（LPGJ），实现它没有意义。数据结构保留在此作为设计约束，确保 L2 的字段设计不会阻碍后续升级。
 
 **生命周期**：跨项目、跨会话，长期积累
 **存储**：`~/.code-sherpa/long-term-memory.jsonl`
@@ -224,9 +281,9 @@ interface LongTermMemory {
 不同级别的记忆以不同方式注入 System Prompt：
 
 ```
-[System Prompt 组装]
+[System Prompt 组装]（MVP 期：仅 L1 + L2）
   │
-  ├── Level 3 (长期记忆)
+  ├── Level 3 (长期记忆) [Phase 2]
   │     └─ 用户偏好："用户喜欢详细输出，包含文件路径和行号"
   │
   ├── Level 2 (工作区记忆)
@@ -240,11 +297,11 @@ interface LongTermMemory {
 
 ### 注入规则
 
-| 记忆级别 | 注入方式 | Token 预算 |
-|---------|---------|-----------|
-| Level 3 | 用户偏好摘要（< 200 tokens） | 固定 |
-| Level 2 | 领域知识 + 最近 5 次查询（< 2K tokens） | 动态 |
-| Level 1 | 完整对话历史 | 剩余全部 |
+| 记忆级别 | 注入方式 | Token 预算 | MVP 期 |
+|---------|---------|-----------|:---:|
+| Level 3 | 用户偏好摘要（< 200 tokens） | 固定 | ❌ |
+| Level 2 | 领域知识 + 最近 5 次查询（< 2K tokens） | 动态 | ✅ |
+| Level 1 | 完整对话历史 | 剩余全部 | ✅ |
 
 ---
 

@@ -12,6 +12,7 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "cli": "tsx src/cli.ts",
+    "config:show": "tsx src/cli.ts config:show",
     "index:build": "tsx src/cli.ts index:build",
     "index:update": "tsx src/cli.ts index:update",
     "index:verify": "tsx src/cli.ts index:verify",
